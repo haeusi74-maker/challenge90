@@ -346,4 +346,5 @@ app.post('/api/family/cheer', auth, (req, res) => {
 app.delete('/api/me/cheers', auth, (req, res) => { req.db.cheers = []; bump(req); res.json({ ok: true }); });
 
 app.use(express.static(path.join(__dirname, 'public'), { etag: true, maxAge: 0 }));
-app.listen(PORT, () => console.log('Challenge90 läuft auf Port ' + PORT));
+if (require.main === module) app.listen(PORT, () => console.log('Challenge90 läuft auf Port ' + PORT));
+module.exports = { app, parseNum, fmtDE, dayIndex, prettify, groupKey, normKey, weekOfDir, extractJson };
