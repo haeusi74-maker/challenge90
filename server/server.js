@@ -9,14 +9,24 @@ const PORT = process.env.PORT || 3000;
 fs.mkdirSync(path.join(DATA_DIR, 'users'), { recursive: true });
 
 // ---------- Benutzerverwaltung ----------
-let reg = { users: [], tokens: {} }; // users: {id,name,color,salt,pin}
+const TOKEN_TTL_MS = 30 * 24 * 3600 * 1000; // Login-Tokens laufen nach 30 Tagen ab
+let reg = { users: [], tokens: {}, tokenExp: {} }; // users: {id,name,color,salt,pin}; tokenExp: Token -> Ablauf (ms)
 try { reg = { ...reg, ...JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')) }; } catch (e) { }
+if (!reg.tokenExp || typeof reg.tokenExp !== 'object') reg.tokenExp = {};
 const saveReg = () => fs.writeFileSync(USERS_FILE, JSON.stringify(reg));
+// Alt-Tokens ohne Ablaufdatum: Ablauf ab jetzt; verwaiste Ablaufeintraege entfernen
+{
+  let changed = false;
+  for (const t of Object.keys(reg.tokens)) if (!reg.tokenExp[t]) { reg.tokenExp[t] = Date.now() + TOKEN_TTL_MS; changed = true; }
+  for (const t of Object.keys(reg.tokenExp)) if (!(t in reg.tokens)) { delete reg.tokenExp[t]; changed = true; }
+  if (changed) { try { saveReg(); } catch (e) { } }
+}
+const dropToken = (t) => { delete reg.tokens[t]; delete reg.tokenExp[t]; };
 const hashPin = (pin, salt) => crypto.scryptSync(String(pin), salt, 32).toString('hex');
 const userDir = (id) => path.join(DATA_DIR, 'users', id);
 const photoDir = (id) => path.join(userDir(id), 'photos');
 const publicUser = (u) => ({ id: u.id, name: u.name, color: u.color, hasPin: !!u.pin });
-function issueToken(id) { const t = crypto.randomBytes(24).toString('hex'); reg.tokens[t] = id; saveReg(); return t; }
+function issueToken(id) { const t = crypto.randomBytes(24).toString('hex'); reg.tokens[t] = id; reg.tokenExp[t] = Date.now() + TOKEN_TTL_MS; saveReg(); return t; }
 
 // ---------- Pro-Benutzer-Datenbank ----------
 const emptyDb = () => ({ meta: {}, days: {}, checks: {}, tasks: {}, photos: {}, summary: null, cheers: [], archive: [], rev: 0 });
@@ -50,6 +60,7 @@ function adoptLegacy(id) {
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', 1); // hinter Cloudflare Tunnel/cloudflared: req.ip aus X-Forwarded-For
 app.use(express.json({ limit: '12mb' }));
 
 app.get('/api/users', (req, res) => res.json(reg.users.map(publicUser)));
@@ -83,10 +94,11 @@ app.post('/api/login', (req, res) => {
 function auth(req, res, next) {
   const t = (req.headers.authorization || '').replace(/^Bearer /, '') || req.query.token;
   const id = reg.tokens[t];
+  if (id && !(reg.tokenExp[t] > Date.now())) { dropToken(t); saveReg(); return res.status(401).json({ error: 'auth' }); }
   if (!id || !reg.users.find(u => u.id === id)) return res.status(401).json({ error: 'auth' });
   req.uid = id; req.db = getDb(id); next();
 }
-app.post('/api/logout', auth, (req, res) => { delete reg.tokens[(req.headers.authorization || '').replace(/^Bearer /, '')]; saveReg(); res.json({ ok: true }); });
+app.post('/api/logout', auth, (req, res) => { dropToken((req.headers.authorization || '').replace(/^Bearer /, '')); saveReg(); res.json({ ok: true }); });
 const bump = (req) => { req.db.rev++; persist(req.uid); };
 
 app.get('/api/me/data', auth, (req, res) => { res.set('Cache-Control', 'no-store'); const u = reg.users.find(x => x.id === req.uid); res.json({ ...req.db, user: publicUser(u) }); });
@@ -142,10 +154,24 @@ function dayIndex(startDate, dateStr) {
   const [y, m, d] = startDate.split('-').map(Number), [y2, m2, d2] = dateStr.split('-').map(Number);
   return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y, m - 1, d)) / 864e5) + 1;
 }
+// Rate-Limit fuer /api/ingest (In-Memory, Fenster-Zaehler)
+const INGEST_WINDOW_MS = 60000;
+const INGEST_MAX_PER_IP = 60;
+const INGEST_MAX_PER_KEY = 30;
+const ingestHits = { ip: new Map(), key: new Map() };
+function ingestLimited(kind, id, max) {
+  const now = Date.now(); const m = ingestHits[kind];
+  if (m.size > 5000) for (const [k, v] of m) if (now - v.t >= INGEST_WINDOW_MS) m.delete(k);
+  let h = m.get(id);
+  if (!h || now - h.t >= INGEST_WINDOW_MS) { h = { n: 0, t: now }; m.set(id, h); }
+  return ++h.n > max;
+}
 app.all('/api/ingest', (req, res) => {
-  const key = req.headers['x-api-key'] || req.query.key || (req.body && req.body.key);
+  if (ingestLimited('ip', req.ip, INGEST_MAX_PER_IP)) return res.status(429).json({ error: 'Zu viele Anfragen – kurz warten' });
+  const key = req.headers['x-api-key']; // nur Header (nie Query/Body: landet sonst in Logs/Proxies)
   const u = key && reg.users.find(x => x.apiKey && x.apiKey === key);
   if (!u) return res.status(401).json({ error: 'API-Key ungültig' });
+  if (ingestLimited('key', u.id, INGEST_MAX_PER_KEY)) return res.status(429).json({ error: 'Zu viele Anfragen – kurz warten' });
   const p = { ...req.query, ...(req.body && typeof req.body === 'object' ? req.body : {}) };
   const db = getDb(u.id);
   if (!db.meta.startDate) return res.status(409).json({ error: 'Challenge noch nicht gestartet (Startdatum fehlt)' });
