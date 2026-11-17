@@ -3,5 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "main": "server.js",
+  "scripts": {
+    "test": "node --test $(find ../tests -maxdepth 1 -name '*.test.js' | sort)"
+  },
   "dependencies": { "express": "^4.19.2" }
 }
