@@ -4,9 +4,19 @@ services:
     container_name: challenge90
     restart: unless-stopped
     ports:
-      - "8090:3000"
+      - "127.0.0.1:8090:3000"
     volumes:
       - ./data:/data
       - ./content:/content:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.11.1
+    container_name: challenge90-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN fehlt in .env}
+    depends_on:
+      - challenge90
