@@ -184,7 +184,7 @@ function render() {
   if (DATA.user) $app.append(h('div', { class: 'dayhead', style: 'margin-bottom:8px' }, h('span', { class: 'sub' }, DATA.user.name + (DATA.user.isAdmin ? ' · Admin' : '')),
     h('button', { class: 'btn sm', onclick: async () => { try { await api('/api/logout', { method: 'POST' }); } catch (e) { } logout(); } }, 'Abmelden / Profil wechseln')));
   if (!ready && !DATA.meta.startDate) return void $app.append(h('div', { class: 'sub', style: 'padding:40px 0;text-align:center' }, 'Lade …'));
-  if (ready && !DATA.meta.startDate && view !== 'start' && view !== 'wissen') return go('start');
+  if (ready && !DATA.meta.startDate && view !== 'start' && view !== 'wissen' && view !== 'admin') return go('start');
   ({ today: vToday, history: vHistory, archive: () => vArchive(sub), checks: vChecks, family: vFamily, wissen: vWissen, start: vStart, admin: vAdmin })[view]();
 }
 
