@@ -25,7 +25,14 @@ const dropToken = (t) => { delete reg.tokens[t]; delete reg.tokenExp[t]; };
 const hashPin = (pin, salt) => crypto.scryptSync(String(pin), salt, 32).toString('hex');
 const userDir = (id) => path.join(DATA_DIR, 'users', id);
 const photoDir = (id) => path.join(userDir(id), 'photos');
-const publicUser = (u) => ({ id: u.id, name: u.name, color: u.color, hasPin: !!u.pin });
+const publicUser = (u) => ({ id: u.id, name: u.name, color: u.color, hasPin: !!u.pin, isAdmin: !!u.isAdmin });
+// Settings und Admin-Migration: Bestehende Installation -> erstes Profil wird Admin
+if (!reg.settings || typeof reg.settings !== 'object') reg.settings = {};
+if (reg.settings.openSignup === undefined) reg.settings.openSignup = true;
+if (reg.users.length && !reg.users.some(u => u.isAdmin)) { reg.users[0].isAdmin = true; try { saveReg(); } catch (e) { } }
+const adminCount = () => reg.users.filter(u => u.isAdmin).length;
+const validPin = (pin) => /^\d{4,8}$/.test(String(pin));
+function dropUserTokens(id) { for (const t of Object.keys(reg.tokens)) if (reg.tokens[t] === id) dropToken(t); }
 function issueToken(id) { const t = crypto.randomBytes(24).toString('hex'); reg.tokens[t] = id; reg.tokenExp[t] = Date.now() + TOKEN_TTL_MS; saveReg(); return t; }
 
 // ---------- Pro-Benutzer-Datenbank ----------
@@ -64,18 +71,25 @@ app.set('trust proxy', 1); // hinter Cloudflare Tunnel/cloudflared: req.ip aus X
 app.use(express.json({ limit: '12mb' }));
 
 app.get('/api/users', (req, res) => res.json(reg.users.map(publicUser)));
-app.post('/api/users', (req, res) => {
-  const { name, color, pin } = req.body || {};
-  if (!name || String(name).trim().length < 1 || String(name).length > 30) return res.status(400).json({ error: 'Name fehlt' });
-  if (pin && !/^\d{4,8}$/.test(pin)) return res.status(400).json({ error: 'PIN: 4–8 Ziffern' });
-  if (reg.users.length >= 20) return res.status(400).json({ error: 'Zu viele Profile' });
+function makeUser(body) {
+  const { name, color, pin } = body || {};
+  if (!name || String(name).trim().length < 1 || String(name).length > 30) return { status: 400, error: 'Name fehlt' };
+  if (pin && !validPin(pin)) return { status: 400, error: 'PIN: 4–8 Ziffern' };
+  if (reg.users.length >= 20) return { status: 400, error: 'Zu viele Profile' };
   const id = crypto.randomBytes(5).toString('hex');
   const u = { id, name: String(name).trim(), color: /^#[0-9a-f]{6}$/i.test(color) ? color : '#ff6a2b' };
   if (pin) { u.salt = crypto.randomBytes(8).toString('hex'); u.pin = hashPin(pin, u.salt); }
   fs.mkdirSync(photoDir(id), { recursive: true });
-  if (reg.users.length === 0) adoptLegacy(id);
-  reg.users.push(u);
-  res.json({ user: publicUser(u), token: issueToken(id) });
+  if (reg.users.length === 0) { adoptLegacy(id); u.isAdmin = true; }
+  reg.users.push(u); saveReg();
+  return { u };
+}
+const bearer = (req) => (req.headers.authorization || '').replace(/^Bearer /, '') || req.query.token;
+const adminByToken = (t) => { const u = reg.users.find(x => x.id === reg.tokens[t]); return u && u.isAdmin && reg.tokenExp[t] > Date.now() ? u : null; };
+app.post('/api/users', (req, res) => {
+  if (reg.users.length && !reg.settings.openSignup && !adminByToken(bearer(req))) return res.status(403).json({ error: 'Neue Profile legt nur der Admin an' });
+  const r = makeUser(req.body); if (r.error) return res.status(r.status).json({ error: r.error });
+  res.json({ user: publicUser(r.u), token: issueToken(r.u.id) });
 });
 const fails = {};
 app.post('/api/login', (req, res) => {
@@ -97,6 +111,13 @@ function auth(req, res, next) {
   if (id && !(reg.tokenExp[t] > Date.now())) { dropToken(t); saveReg(); return res.status(401).json({ error: 'auth' }); }
   if (!id || !reg.users.find(u => u.id === id)) return res.status(401).json({ error: 'auth' });
   req.uid = id; req.db = getDb(id); next();
+}
+function adminAuth(req, res, next) {
+  auth(req, res, () => {
+    const u = reg.users.find(x => x.id === req.uid);
+    if (!u || !u.isAdmin) return res.status(403).json({ error: 'Nur für Admins' });
+    next();
+  });
 }
 app.post('/api/logout', auth, (req, res) => { dropToken((req.headers.authorization || '').replace(/^Bearer /, '')); saveReg(); res.json({ ok: true }); });
 const bump = (req) => { req.db.rev++; persist(req.uid); };
@@ -204,7 +225,7 @@ const aiPublic = () => ({ provider: ai.provider, baseUrl: ai.baseUrl, model: ai.
 const base = () => ai.baseUrl.replace(/\/+$/, '');
 
 app.get('/api/ai/config', auth, (req, res) => res.json(aiPublic()));
-app.put('/api/ai/config', auth, (req, res) => {
+app.put('/api/ai/config', adminAuth, (req, res) => {
   const { provider, baseUrl, model, apiKey } = req.body || {};
   if (!['anthropic', 'openai'].includes(provider) || !/^https?:\/\//.test(baseUrl || '')) return res.status(400).json({ error: 'Ungültige Konfiguration' });
   ai.provider = provider; ai.baseUrl = baseUrl; ai.model = String(model || '');
@@ -220,7 +241,7 @@ async function aiFetch(url, init) {
 const aiHeaders = () => ai.provider === 'anthropic'
   ? { 'x-api-key': ai.apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
   : { Authorization: 'Bearer ' + ai.apiKey, 'content-type': 'application/json' };
-app.get('/api/ai/models', auth, async (req, res) => {
+app.get('/api/ai/models', adminAuth, async (req, res) => {
   try {
     const j = await aiFetch(base() + (ai.provider === 'anthropic' ? '/v1/models?limit=100' : '/models'), { headers: aiHeaders() });
     const list = (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean).map(x => String(x).replace(/^models\//, ''));
@@ -259,6 +280,45 @@ app.post('/api/me/meal/analyze', auth, async (req, res) => {
     const n = (v) => { const x = parseFloat(String(v).replace(',', '.')); return Number.isFinite(x) ? Math.round(x * 10) / 10 : 0; };
     res.json({ items: (r.items || []).slice(0, 20).map(i => ({ name: String(i.name || '?').slice(0, 80), grams: n(i.grams), kcal: n(i.kcal), protein: n(i.protein), fat: n(i.fat), carbs: n(i.carbs) })), confidence: r.confidence || '', notes: String(r.notes || '').slice(0, 400) });
   } catch (e) { console.error('AI error:', e.message); res.status(502).json({ error: e.message }); }
+});
+
+// ---------- Admin ----------
+const adminUser = (u) => { const d = getDb(u.id); return { ...publicUser(u), startDate: (d.meta || {}).startDate || null, days: Object.keys(d.days || {}).length, sessions: Object.values(reg.tokens).filter(x => x === u.id).length }; };
+app.get('/api/admin/users', adminAuth, (req, res) => res.json(reg.users.map(adminUser)));
+app.post('/api/admin/users', adminAuth, (req, res) => {
+  const r = makeUser(req.body); if (r.error) return res.status(r.status).json({ error: r.error });
+  if (req.body.isAdmin === true) { r.u.isAdmin = true; saveReg(); }
+  res.json({ user: publicUser(r.u) });
+});
+app.patch('/api/admin/users/:id', adminAuth, (req, res) => {
+  const u = reg.users.find(x => x.id === req.params.id); if (!u) return res.status(404).json({ error: 'unbekannt' });
+  const { name, color, isAdmin } = req.body || {};
+  if (name !== undefined) { if (!String(name).trim() || String(name).length > 30) return res.status(400).json({ error: 'Name ungültig' }); u.name = String(name).trim(); }
+  if (color !== undefined && /^#[0-9a-f]{6}$/i.test(color)) u.color = color;
+  if (isAdmin !== undefined) {
+    if (!isAdmin && u.isAdmin && adminCount() <= 1) return res.status(400).json({ error: 'Es muss mindestens ein Admin bleiben' });
+    u.isAdmin = !!isAdmin;
+  }
+  saveReg(); res.json({ user: publicUser(u) });
+});
+app.post('/api/admin/users/:id/pin', adminAuth, (req, res) => {
+  const u = reg.users.find(x => x.id === req.params.id); if (!u) return res.status(404).json({ error: 'unbekannt' });
+  const { pin } = req.body || {};
+  if (pin) { if (!validPin(pin)) return res.status(400).json({ error: 'PIN: 4–8 Ziffern' }); u.salt = crypto.randomBytes(8).toString('hex'); u.pin = hashPin(pin, u.salt); } else { delete u.pin; delete u.salt; }
+  delete fails[u.id]; dropUserTokens(u.id); saveReg(); res.json({ ok: true });
+});
+app.delete('/api/admin/users/:id', adminAuth, (req, res) => {
+  const u = reg.users.find(x => x.id === req.params.id); if (!u) return res.status(404).json({ error: 'unbekannt' });
+  if (u.isAdmin && adminCount() <= 1) return res.status(400).json({ error: 'Der letzte Admin kann nicht gelöscht werden' });
+  dropUserTokens(u.id); reg.users = reg.users.filter(x => x !== u); saveReg();
+  dbs.delete(u.id); writers.delete(u.id);
+  fs.rm(userDir(u.id), { recursive: true, force: true }, () => { });
+  res.json({ ok: true });
+});
+app.get('/api/admin/settings', adminAuth, (req, res) => res.json(reg.settings));
+app.put('/api/admin/settings', adminAuth, (req, res) => {
+  if (typeof (req.body || {}).openSignup === 'boolean') reg.settings.openSignup = req.body.openSignup;
+  saveReg(); res.json(reg.settings);
 });
 
 // ---------- Challenge-Material (Ordner /content) ----------

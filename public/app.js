@@ -183,7 +183,7 @@ function render() {
   if (view === 'login') return vLogin();
   if (!ready && !DATA.meta.startDate) return void $app.append(h('div', { class: 'sub', style: 'padding:40px 0;text-align:center' }, 'Lade …'));
   if (ready && !DATA.meta.startDate && view !== 'start' && view !== 'wissen') return go('start');
-  ({ today: vToday, history: vHistory, archive: () => vArchive(sub), checks: vChecks, family: vFamily, wissen: vWissen, start: vStart })[view]();
+  ({ today: vToday, history: vHistory, archive: () => vArchive(sub), checks: vChecks, family: vFamily, wissen: vWissen, start: vStart, admin: vAdmin })[view]();
 }
 
 // ---------- Eingabefelder ----------
@@ -664,7 +664,9 @@ function vStart() {
     h('div', { class: 'card' }, h('h3', null, 'Deine Vorher-Bilder'), h('div', { class: 'sub', style: 'margin-bottom:8px' }, 'Die Person, die du nie wieder sein wirst!'), photoGrid('before')));
 
   $app.append(h('h2', null, 'Apple Health / Kurzbefehle'), importCard());
-  $app.append(h('h2', null, 'KI-Anbindung'), aiCard());
+  const isAdmin = !!(DATA.user && DATA.user.isAdmin);
+  $app.append(h('h2', null, 'KI-Anbindung'), isAdmin ? aiCard() : aiStatusCard());
+  if (isAdmin) $app.append(h('h2', null, 'Administration'), h('div', { class: 'card' }, h('div', { class: 'hint' }, 'Profile verwalten, KI-Key für alle hinterlegen, Registrierung steuern.'), h('button', { class: 'btn acc', style: 'width:100%', onclick: () => go('admin') }, 'Admin-Bereich öffnen')));
   $app.append(h('h2', null, 'Profil'), h('div', { class: 'card' },
     h('div', { class: 'dayhead' }, h('b', null, DATA.user ? DATA.user.name : ''), h('button', { class: 'btn sm', onclick: async () => { try { await api('/api/logout', { method: 'POST' }); } catch (e) { } logout(); } }, 'Profil wechseln')),
     h('label', { style: 'display:flex;gap:10px;align-items:center;margin-top:12px;text-transform:none;letter-spacing:0;font-size:15px;color:var(--text)' },
@@ -878,3 +880,39 @@ document.addEventListener('visibilitychange', async () => {
   if (DATA.rev !== rev && !typing && view !== 'login') render();
 });
 (async () => { render(); if (SESSION) { await load(); } ready = true; render(); pushSummary(); })();
+
+// ---------- Admin ----------
+function aiStatusCard() {
+  const card = h('div', { class: 'card' }, h('div', { class: 'sub' }, 'Lädt …'));
+  (async () => {
+    try { const c = await (await api('/api/ai/config')).json(); card.replaceChildren(h('div', { class: 'hint' }, c.hasKey && c.model ? `Eingerichtet (${c.model}). Der Admin verwaltet die Anbindung für alle.` : 'Noch nicht eingerichtet. Bitte den Admin, den API-Key im Admin-Bereich zu hinterlegen.')); }
+    catch (e) { card.replaceChildren('Nicht erreichbar'); }
+  })();
+  return card;
+}
+function vAdmin() {
+  if (!(DATA.user && DATA.user.isAdmin)) return go('start');
+  const list = h('div'); const msg = h('div', { class: 'hint' });
+  const act = async (fn, ok) => { try { const r = await fn(); if (!r.ok) throw new Error((await r.json()).error || 'Fehler'); say(ok + ' ✓'); await refresh(); } catch (e) { say(e.message, true); } };
+  const refresh = async () => {
+    const r = await api('/api/admin/users'); const users = await r.json();
+    list.replaceChildren(...users.map(u => h('div', { class: 'card' },
+      h('div', { class: 'dayhead' }, h('b', { style: 'color:' + u.color }, u.name + (u.isAdmin ? ' · Admin' : '')), h('span', { class: 'sub' }, `${u.days} Tage · ${u.sessions} Sitzung(en)${u.hasPin ? ' · PIN' : ''}`)),
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        h('button', { class: 'btn sm', onclick: () => { const n = prompt('Neuer Name:', u.name); if (n) act(() => jput('/api/admin/users/' + u.id, { name: n }, 'PATCH'), 'Name geändert'); } }, 'Umbenennen'),
+        h('button', { class: 'btn sm', onclick: () => { const p = prompt('Neue PIN (4–8 Ziffern, leer = PIN entfernen). Alle Sitzungen werden beendet.'); if (p !== null) act(() => jput(`/api/admin/users/${u.id}/pin`, { pin: p || undefined }, 'POST'), 'PIN gesetzt'); } }, 'PIN zurücksetzen'),
+        h('button', { class: 'btn sm', onclick: () => act(() => jput('/api/admin/users/' + u.id, { isAdmin: !u.isAdmin }, 'PATCH'), 'Rolle geändert') }, u.isAdmin ? 'Admin entziehen' : 'Zum Admin machen'),
+        h('button', { class: 'btn sm', style: 'color:var(--bad)', onclick: () => { if (confirm(`„${u.name}“ und ALLE Daten (inkl. Fotos) endgültig löschen?`)) act(() => api('/api/admin/users/' + u.id, { method: 'DELETE' }), 'Gelöscht'); } }, 'Löschen')))));
+  };
+  const nn = h('input', { placeholder: 'Name' }), np = h('input', { placeholder: 'PIN (optional)', inputmode: 'numeric' });
+  const signup = h('input', { type: 'checkbox', style: 'width:22px;min-height:22px' });
+  (async () => { try { signup.checked = (await (await api('/api/admin/settings')).json()).openSignup; } catch (e) { } })();
+  signup.onchange = () => act(() => jput('/api/admin/settings', { openSignup: signup.checked }), 'Gespeichert');
+  $app.append(h('div', { class: 'dayhead' }, h('h2', { style: 'margin:0' }, 'Admin'), h('button', { class: 'btn sm', onclick: () => go('start') }, 'Zurück')),
+    h('h2', null, 'KI-Anbindung (für alle)'), aiCard(),
+    h('h2', null, 'Profile'), list,
+    h('div', { class: 'card' }, h('h3', null, 'Neues Profil anlegen'), h('div', { class: 'row' }, h('div', { class: 'field' }, nn), h('div', { class: 'field' }, np)),
+      h('button', { class: 'btn acc', style: 'width:100%', onclick: async () => { if (!nn.value.trim()) return; await act(() => jput('/api/admin/users', { name: nn.value, pin: np.value || undefined }, 'POST'), 'Angelegt'); nn.value = np.value = ''; } }, 'Anlegen')),
+    h('div', { class: 'card' }, h('label', { style: 'display:flex;gap:10px;align-items:center;text-transform:none;letter-spacing:0;font-size:15px;color:var(--text)' }, signup, 'Offene Registrierung (jeder mit dem Link kann ein Profil anlegen)')), msg);
+  refresh();
+}
