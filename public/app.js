@@ -192,6 +192,45 @@ function input(opts) { // opts: value, onInput, type, inputmode, placeholder
   i.addEventListener('input', () => opts.onInput(i.value));
   return i;
 }
+// Kalorien- & Makro-Rechner (Modul 7, Schritte 1–3) – übernimmt auf Wunsch die Tagesziele
+function calcCard(meta, touch) {
+  const P = meta.profile = meta.profile || { sex: '', age: '', height: '', af: '1.65', goal: 'deficit' };
+  const out = h('div');
+  const sel = (opts, value, onChange) => {
+    const s = h('select', null, opts.map(([v, l]) => h('option', { value: v, ...(String(v) === String(value) ? { selected: true } : {}) }, l)));
+    s.addEventListener('change', () => onChange(s.value)); return s;
+  };
+  const st = meta.status = meta.status || { m: {} };
+  const profile = () => ({ ...P, weight: st.weight });
+  const paint = () => {
+    const err = CALC.validateProfile(profile());
+    if (err) return out.replaceChildren(h('div', { class: 'hint' }, err));
+    const r = CALC.calcPlan(profile());
+    out.replaceChildren(
+      h('div', { class: 'hint' }, `Grundumsatz ${fmt(r.bmr, 0)} kcal × Aktivität = Erhaltung ${fmt(r.tdee, 0)} kcal. Fett mindestens ${r.fatMin} g (Größe ÷ 3).`),
+      h('div', { class: 'chips' }, h('span', { class: 'chip ok' }, `${fmt(r.kcal, 0)} kcal`), h('span', { class: 'chip' }, `P ${r.protein} g`), h('span', { class: 'chip' }, `F ${r.fat} g`), h('span', { class: 'chip' }, `KH ${r.carbs} g`)),
+      h('button', { class: 'btn acc', onclick: () => {
+        meta.targets = { ...(meta.targets || DEFAULT_TARGETS), kcal: String(r.kcal), protein: String(r.protein), fat: String(r.fat), carbs: String(r.carbs) };
+        touch(); say('Tagesziele übernommen ✓'); render();
+      } }, 'Als Tagesziele übernehmen'),
+      h('div', { class: 'hint' }, 'Startwerte für die ersten 14 Tage – danach im Check anpassen (Coaching Woche 2).'));
+  };
+  const field = (label, ctl) => h('div', { class: 'field' }, h('label', null, label), ctl);
+  const upd = (k) => (v) => { P[k] = v; touch(); paint(); };
+  const weightIn = input({ value: st.weight, inputmode: 'decimal', onInput: v => { st.weight = v; touch(); const o = document.getElementById('st-weight'); if (o) o.value = v; paint(); } });
+  weightIn.id = 'calc-weight';
+  const card = h('div', { class: 'card' }, h('h3', null, 'Kalorien & Makros berechnen'),
+    h('div', { class: 'row' },
+      field('Gewicht (kg)', weightIn),
+      field('Geschlecht', sel([['', '– wählen –'], ['m', 'Mann'], ['f', 'Frau']], P.sex, upd('sex'))),
+      field('Alter (Jahre)', input({ value: P.age, inputmode: 'numeric', onInput: upd('age') })),
+      field('Größe (cm)', input({ value: P.height, inputmode: 'numeric', onInput: upd('height') }))),
+    field('Aktivität im Alltag', sel(CALC.ACTIVITY, P.af, upd('af'))),
+    field('Ziel', sel(Object.entries(CALC.GOALS).map(([k, g]) => [k, g.label]), P.goal, upd('goal'))),
+    out);
+  paint();
+  return card;
+}
 function yn(value, onChange) {
   const y = h('button', { type: 'button' }, 'Ja'), n = h('button', { type: 'button' }, 'Nein');
   const paint = (v) => { y.className = 'y' + (v === true ? ' on' : ''); n.className = 'n' + (v === false ? ' on' : ''); };
@@ -596,6 +635,7 @@ function vStart() {
       h('button', { class: 'btn', onclick: newChallengeDialog }, '↻ Neue Challenge starten'),
       (DATA.archive || []).length ? h('div', { style: 'margin-top:12px' }, h('h3', null, 'Frühere Challenges'), (DATA.archive).slice().reverse().map(a => h('button', { class: 'item', style: 'display:flex;width:100%;justify-content:space-between;align-items:center;padding:12px;margin:0 0 6px;background:var(--card2);border:0;border-radius:12px;color:var(--text);font:inherit', onclick: () => go('archive', a.id) }, h('span', null, h('b', null, a.name), h('div', { class: 'meta' }, `ab ${fmtDate(parseISO(a.startDate))}`)), h('span', { class: 'meta' }, '›')))) : null));
   }
+  if (first) $app.append(calcCard(meta, touch));
   $app.append(h('div', { class: 'card' }, h('h3', null, 'Challenge'),
     h('div', { class: 'field' }, h('label', null, 'Starttag (Tag 1)'), dateIn),
     first ? h('button', { class: 'btn acc', onclick: () => { meta.startDate = dateIn.value || iso(new Date()); touch(); curDay = null; go('today'); } }, 'Challenge starten') : null));
@@ -611,15 +651,16 @@ function vStart() {
       h('div', { class: 'field' }, h('label', null, 'Event-Kalorien (Standard)'), input({ value: meta.eventKcal, inputmode: 'numeric', placeholder: 'Ziel + 800', onInput: v => { meta.eventKcal = v; touch(); } })),
       h('div', { class: 'field' }, h('label', null, 'Wochenziel (Tage im Soll)'), input({ value: meta.weekGoal, inputmode: 'numeric', placeholder: '5', onInput: v => { meta.weekGoal = v; touch(); } })),
       h('div', { class: 'field' }, h('label', null, 'Tag im Soll ab (%)'), input({ value: meta.okPct, inputmode: 'numeric', placeholder: '80', onInput: v => { meta.okPct = v; touch(); } }))),
-    h('div', { class: 'hint' }, 'Berechne Kalorien & Makros nach dem Kapitel „Energiebilanz“ / „Makronährstoffe“ im Wissen-Tab.')));
+    h('div', { class: 'hint' }, 'Tipp: Kalorien & Makros kannst du unten im Rechner „Kalorien & Makros berechnen“ ermitteln und direkt übernehmen.')));
 
   const st = meta.status;
   $app.append(h('h2', null, 'Dein Status quo'),
     h('div', { class: 'card' }, h('div', { class: 'row' },
-      h('div', { class: 'field' }, h('label', null, 'Aktuelles Gewicht (kg)'), input({ value: st.weight, inputmode: 'decimal', onInput: v => { st.weight = v; touch(); } })),
+      h('div', { class: 'field' }, h('label', null, 'Aktuelles Gewicht (kg)'), (() => { const i = input({ value: st.weight, inputmode: 'decimal', onInput: v => { st.weight = v; touch(); const o = document.getElementById('calc-weight'); if (o) { o.value = v; o.dispatchEvent(new Event('input')); } } }); i.id = 'st-weight'; return i; })()),
       h('div', { class: 'field' }, h('label', null, 'Körperfettanteil (%)'), input({ value: st.bf, inputmode: 'decimal', onInput: v => { st.bf = v; touch(); } }))),
       h('h3', { style: 'margin-top:12px' }, 'Umfänge (cm)'),
       h('div', { class: 'row' }, MEASURES.map(([mk, ml]) => h('div', { class: 'field' }, h('label', null, ml), input({ value: st.m[mk], inputmode: 'decimal', onInput: v => { st.m[mk] = v; touch(); } }))))),
+    first ? null : calcCard(meta, touch),
     h('div', { class: 'card' }, h('h3', null, 'Deine Vorher-Bilder'), h('div', { class: 'sub', style: 'margin-bottom:8px' }, 'Die Person, die du nie wieder sein wirst!'), photoGrid('before')));
 
   $app.append(h('h2', null, 'Apple Health / Kurzbefehle'), importCard());
